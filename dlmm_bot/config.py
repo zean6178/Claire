@@ -52,8 +52,8 @@ class ScannerConfig:
     # Liquidity
     min_liquidity_usd: float = 10000.0
 
-    # Bin step preferences
-    preferred_bin_steps: List[int] = field(default_factory=lambda: [100, 125, 150, 200, 250])
+    # Bin step preferences (include small for stable pairs, large for memes)
+    preferred_bin_steps: List[int] = field(default_factory=lambda: [1, 2, 4, 5, 10, 15, 20, 25, 50, 80, 100, 125, 150, 200, 250])
 
     # Scan interval
     scan_interval_seconds: int = 10
