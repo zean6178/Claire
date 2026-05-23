@@ -30,6 +30,7 @@ from .strategies import (
     StrategyType,
     select_strategy_for_pool,
 )
+from .telegram_bot import AlertType, TelegramBot
 from .utils import now_ts, setup_logging
 
 logger = logging.getLogger("dlmm_bot.bot")
@@ -64,6 +65,7 @@ class DLMMBot:
         self.risk = RiskManager()
         self.inventory = InventoryManager()
         self.pnl = PnLTracker()
+        self.telegram: Optional[TelegramBot] = None
 
         # State
         self._running = False
@@ -92,6 +94,11 @@ class DLMMBot:
         await self.position_manager.initialize()
         await self.monitor.initialize()
         await self.inventory.initialize()
+
+        # Initialize Telegram bot
+        self.telegram = TelegramBot(bot_reference=self)
+        if self.telegram.enabled:
+            await self.telegram.send_bot_started()
 
     async def shutdown(self):
         """Graceful shutdown: close positions, sweep, report."""
@@ -133,6 +140,13 @@ class DLMMBot:
         # Print summaries
         self.pnl.print_summary()
         logger.info(self.risk.get_risk_summary())
+
+        # Notify Telegram
+        if self.telegram and self.telegram.enabled:
+            summary = self.pnl.print_summary()
+            await self.telegram.send_bot_stopped(summary or "Session ended")
+            self.telegram.stop()
+            await self.telegram.close()
 
         # Cleanup
         await self.scanner.close()
@@ -210,6 +224,20 @@ class DLMMBot:
 
         if not score.passed:
             return  # Score too low
+
+        # --- TELEGRAM: Screening alert ---
+        if self.telegram and self.telegram.enabled and CONFIG.telegram.alert_on_screening:
+            await self.telegram.send_screening_alert(
+                pool_name=candidate.name,
+                pool_address=candidate.address,
+                score=score.total_score,
+                strategy_name="pending",
+                volume_5m=candidate.volume_5m_usd,
+                fee_rate_bps=candidate.base_fee_bps,
+                holders=candidate.holders,
+                pool_age_seconds=candidate.pool_age_seconds,
+                liquidity_usd=candidate.liquidity_usd,
+            )
 
         # --- STEP 2: Select strategy ---
         strategy = select_strategy_for_pool(
@@ -311,6 +339,17 @@ class DLMMBot:
                 f"Size={sol_amount:.3f} SOL | "
                 f"Shape={strategy.shape} | Bins={strategy.num_bins}"
             )
+
+            # --- TELEGRAM: Position opened alert ---
+            if self.telegram and self.telegram.enabled and CONFIG.telegram.alert_on_open:
+                await self.telegram.send_position_opened(
+                    pool_name=candidate.name,
+                    strategy=strategy.name,
+                    sol_amount=sol_amount,
+                    shape=strategy.shape,
+                    num_bins=strategy.num_bins,
+                    score=score.total_score,
+                )
 
     # =========================================================================
     # ENHANCED MONITOR WITH EXIT DECISION TREE
@@ -434,6 +473,29 @@ class DLMMBot:
                     fees_earned_sol=position.fees_earned_sol,
                 )
 
+                # --- TELEGRAM: Position closed alert ---
+                if self.telegram and self.telegram.enabled and CONFIG.telegram.alert_on_close:
+                    duration = now_ts() - position.entry_time
+                    await self.telegram.send_position_closed(
+                        pool_name=position.pool_name,
+                        reason=exit_result.decision.value,
+                        duration_seconds=duration,
+                        fees_earned_sol=position.fees_earned_sol,
+                        fees_earned_usd=position.fees_earned_usd,
+                        net_pnl_sol=position.fees_earned_sol,  # approximate
+                        net_pnl_usd=position.fees_earned_usd,
+                    )
+
+                # --- TELEGRAM: Risk alerts ---
+                if self.telegram and self.telegram.enabled and CONFIG.telegram.alert_on_risk:
+                    if exit_result.decision.value in ("kill_switch", "rug_detected"):
+                        await self.telegram.send_risk_alert(
+                            AlertType.KILL_SWITCH
+                            if exit_result.decision.value == "kill_switch"
+                            else AlertType.RUG_DETECTED,
+                            exit_result.reason,
+                        )
+
     # =========================================================================
     # POST-CLOSE HANDLER
     # =========================================================================
@@ -489,6 +551,11 @@ class DLMMBot:
         close_task = asyncio.create_task(self._position_close_handler())
         risk_task = asyncio.create_task(self._risk_report_loop())
         self._tasks = [scan_task, monitor_task, close_task, risk_task]
+
+        # Start Telegram polling if enabled
+        if self.telegram and self.telegram.enabled:
+            tg_task = asyncio.create_task(self.telegram.polling_loop())
+            self._tasks.append(tg_task)
 
         logger.info("Bot is RUNNING. Press Ctrl+C to stop.")
 

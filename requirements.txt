@@ -13,3 +13,6 @@ aiohttp>=3.9.0
 
 # Utilities
 python-dotenv>=1.0.0
+
+# Note: Telegram integration uses httpx (already included above).
+# No additional telegram library needed — we use raw Bot API via httpx.
