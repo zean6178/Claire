@@ -52,14 +52,14 @@ class ScannerConfig:
     # Liquidity
     min_liquidity_usd: float = 10000.0
 
-    # Bin step preferences
-    preferred_bin_steps: List[int] = field(default_factory=lambda: [100, 125, 150, 200, 250])
+    # Bin step preferences (include small for stable pairs, large for memes)
+    preferred_bin_steps: List[int] = field(default_factory=lambda: [1, 2, 4, 5, 10, 15, 20, 25, 50, 80, 100, 125, 150, 200, 250])
 
     # Scan interval
     scan_interval_seconds: int = 10
 
-    # Meteora API
-    meteora_api_url: str = "https://dlmm-api.meteora.ag"
+    # Meteora API (new endpoint as of 2025)
+    meteora_api_url: str = "https://dlmm.datapi.meteora.ag"
     dexscreener_api_url: str = "https://api.dexscreener.com/latest/dex"
     jupiter_price_api_url: str = "https://api.jup.ag/price/v2"
 
@@ -153,6 +153,32 @@ class PnlConfig:
 
 
 @dataclass
+class TelegramConfig:
+    """Telegram bot configuration."""
+    # Bot token from @BotFather
+    bot_token: str = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    # Chat ID to send alerts to (your user ID or group ID)
+    chat_id: str = os.getenv("TELEGRAM_CHAT_ID", "")
+
+    # Alert settings
+    alert_on_screening: bool = True    # Alert when token passes screening
+    alert_on_open: bool = True         # Alert when position opens
+    alert_on_close: bool = True        # Alert when position closes
+    alert_on_risk: bool = True         # Alert on kill switch / cooldown
+    alert_on_oor: bool = True          # Alert on out-of-range
+
+    # Minimum score to trigger screening alert
+    min_score_for_alert: float = 70.0
+
+    # Rate limit alerts (max per minute)
+    max_alerts_per_minute: int = 10
+
+    # Quiet hours (no screening alerts, only risk alerts)
+    quiet_hours_start: int = -1        # -1 = disabled. Use 0-23 for hour
+    quiet_hours_end: int = -1
+
+
+@dataclass
 class BotConfig:
     """Master bot configuration."""
     rpc: RpcConfig = field(default_factory=RpcConfig)
@@ -162,6 +188,7 @@ class BotConfig:
     monitor: MonitorConfig = field(default_factory=MonitorConfig)
     inventory: InventoryConfig = field(default_factory=InventoryConfig)
     pnl: PnlConfig = field(default_factory=PnlConfig)
+    telegram: TelegramConfig = field(default_factory=TelegramConfig)
 
     # Logging
     log_level: str = "INFO"

@@ -82,6 +82,7 @@ class PositionManager:
         self._keypair: Optional[Keypair] = None
         self._rpc: Optional[AsyncClient] = None
         self._http: Optional[httpx.AsyncClient] = None
+        self._lock = asyncio.Lock()  # Prevents race conditions on positions dict
 
     async def initialize(self):
         """Load wallet and connect to RPC."""
@@ -99,6 +100,15 @@ class PositionManager:
             await self._rpc.close()
         if self._http and not self._http.is_closed:
             await self._http.aclose()
+
+    async def get_wallet_balance(self) -> float:
+        """Get current SOL balance of wallet (in SOL, not lamports)."""
+        try:
+            result = await self._rpc.get_balance(self._keypair.pubkey())
+            return lamports_to_sol(result.value)
+        except Exception as e:
+            logger.error(f"Failed to get wallet balance: {e}")
+            return 0.0
 
 
     def _calculate_bin_range(
@@ -181,76 +191,87 @@ class PositionManager:
     ) -> Optional[ActivePosition]:
         """
         Open a DLMM position on the given pool.
-        
-        In production, this sends the actual Meteora AddLiquidity 
-        instruction. For now, builds the params and logs/simulates.
+        Thread-safe via asyncio.Lock.
         """
-        shape = shape or PositionShape(self.cfg.default_shape)
-        side = side or (
-            PositionSide.SINGLE_SIDED_SOL
-            if self.cfg.prefer_single_sided_sol
-            else PositionSide.BOTH_SIDES
-        )
-        num_bins = num_bins or self.cfg.default_num_bins
-
-        # Check limits
-        if len(self.positions) >= self.cfg.max_open_positions:
-            logger.warning("Max open positions reached. Cannot open new.")
-            return None
-
-        if sol_amount > CONFIG.wallet.max_per_position_sol:
-            sol_amount = CONFIG.wallet.max_per_position_sol
-            logger.info(f"Capped position size to {sol_amount} SOL")
-
-        # Calculate bin range
-        lower_bin, upper_bin = self._calculate_bin_range(
-            candidate.active_bin_id, num_bins, side
-        )
-        bin_ids = list(range(lower_bin, upper_bin + 1))
-
-        # Calculate distribution weights
-        weights = self._calculate_distribution(shape, len(bin_ids))
-
-        logger.info(
-            f"Opening position on {candidate.name} | "
-            f"Shape={shape.value} | Side={side.value} | "
-            f"Bins={lower_bin}..{upper_bin} ({len(bin_ids)} bins) | "
-            f"SOL={sol_amount} | ActiveBin={candidate.active_bin_id}"
-        )
-
-        if CONFIG.dry_run:
-            logger.info("[DRY RUN] Would send AddLiquidity tx")
-            position_key = f"dry_{candidate.address}_{now_ts()}"
-        else:
-            position_key = await self._send_add_liquidity_tx(
-                candidate, sol_amount, bin_ids, weights, side
+        async with self._lock:
+            shape = shape or PositionShape(self.cfg.default_shape)
+            side = side or (
+                PositionSide.SINGLE_SIDED_SOL
+                if self.cfg.prefer_single_sided_sol
+                else PositionSide.BOTH_SIDES
             )
-            if not position_key:
+            num_bins = num_bins or self.cfg.default_num_bins
+
+            # Check limits
+            if len([p for p in self.positions.values() if not p.is_closed]) >= self.cfg.max_open_positions:
+                logger.warning("Max open positions reached. Cannot open new.")
                 return None
 
-        # Create position record
-        position = ActivePosition(
-            position_pubkey=position_key,
-            pool_address=candidate.address,
-            pool_name=candidate.name,
-            mint_x=candidate.mint_x,
-            mint_y=candidate.mint_y,
-            shape=shape,
-            side=side,
-            bin_ids=bin_ids,
-            lower_bin_id=lower_bin,
-            upper_bin_id=upper_bin,
-            active_bin_at_entry=candidate.active_bin_id,
-            entry_price=candidate.current_price,
-            sol_deposited=sol_amount,
-            token_deposited=0.0,
-            entry_time=now_ts(),
-            entry_volume_5m=candidate.volume_5m_usd,
-        )
+            if sol_amount > CONFIG.wallet.max_per_position_sol:
+                sol_amount = CONFIG.wallet.max_per_position_sol
+                logger.info(f"Capped position size to {sol_amount} SOL")
 
-        self.positions[position_key] = position
-        logger.info(f"Position opened: {position_key}")
-        return position
+            # --- BALANCE CHECK ---
+            balance = await self.get_wallet_balance()
+            required = sol_amount + CONFIG.wallet.reserve_sol
+            if balance < required:
+                logger.warning(
+                    f"Insufficient balance: {balance:.4f} SOL available, "
+                    f"need {required:.4f} SOL ({sol_amount} + {CONFIG.wallet.reserve_sol} reserve). "
+                    f"Skipping."
+                )
+                return None
+
+            # Calculate bin range
+            lower_bin, upper_bin = self._calculate_bin_range(
+                candidate.active_bin_id, num_bins, side
+            )
+            bin_ids = list(range(lower_bin, upper_bin + 1))
+
+            # Calculate distribution weights
+            weights = self._calculate_distribution(shape, len(bin_ids))
+
+            logger.info(
+                f"Opening position on {candidate.name} | "
+                f"Shape={shape.value} | Side={side.value} | "
+                f"Bins={lower_bin}..{upper_bin} ({len(bin_ids)} bins) | "
+                f"SOL={sol_amount} | ActiveBin={candidate.active_bin_id} | "
+                f"Balance={balance:.4f} SOL"
+            )
+
+            if CONFIG.dry_run:
+                logger.info("[DRY RUN] Would send AddLiquidity tx")
+                position_key = f"dry_{candidate.address}_{now_ts()}"
+            else:
+                position_key = await self._send_add_liquidity_tx(
+                    candidate, sol_amount, bin_ids, weights, side
+                )
+                if not position_key:
+                    return None
+
+            # Create position record
+            position = ActivePosition(
+                position_pubkey=position_key,
+                pool_address=candidate.address,
+                pool_name=candidate.name,
+                mint_x=candidate.mint_x,
+                mint_y=candidate.mint_y,
+                shape=shape,
+                side=side,
+                bin_ids=bin_ids,
+                lower_bin_id=lower_bin,
+                upper_bin_id=upper_bin,
+                active_bin_at_entry=candidate.active_bin_id,
+                entry_price=candidate.current_price,
+                sol_deposited=sol_amount,
+                token_deposited=0.0,
+                entry_time=now_ts(),
+                entry_volume_5m=candidate.volume_5m_usd,
+            )
+
+            self.positions[position_key] = position
+            logger.info(f"Position opened: {position_key}")
+            return position
 
 
     async def _send_add_liquidity_tx(
@@ -316,33 +337,35 @@ class PositionManager:
         """
         Close (remove liquidity from) a position.
         Claims fees + removes all liquidity.
+        Thread-safe via asyncio.Lock.
         """
-        position = self.positions.get(position_key)
-        if not position or position.is_closed:
-            logger.warning(f"Position {position_key} not found or already closed")
-            return False
+        async with self._lock:
+            position = self.positions.get(position_key)
+            if not position or position.is_closed:
+                logger.warning(f"Position {position_key} not found or already closed")
+                return False
 
-        logger.info(
-            f"Closing position {position_key} | "
-            f"Pool={position.pool_name} | Reason={reason}"
-        )
-
-        if CONFIG.dry_run:
-            logger.info("[DRY RUN] Would send RemoveLiquidity + ClaimFee tx")
-            success = True
-        else:
-            success = await self._send_remove_liquidity_tx(position)
-
-        if success:
-            position.is_closed = True
-            position.close_reason = reason
             logger.info(
-                f"Position closed. Fees earned: "
-                f"${position.fees_earned_usd:.2f} / "
-                f"{position.fees_earned_sol:.4f} SOL"
+                f"Closing position {position_key} | "
+                f"Pool={position.pool_name} | Reason={reason}"
             )
 
-        return success
+            if CONFIG.dry_run:
+                logger.info("[DRY RUN] Would send RemoveLiquidity + ClaimFee tx")
+                success = True
+            else:
+                success = await self._send_remove_liquidity_tx(position)
+
+            if success:
+                position.is_closed = True
+                position.close_reason = reason
+                logger.info(
+                    f"Position closed. Fees earned: "
+                    f"${position.fees_earned_usd:.2f} / "
+                    f"{position.fees_earned_sol:.4f} SOL"
+                )
+
+            return success
 
     async def _send_remove_liquidity_tx(
         self, position: ActivePosition

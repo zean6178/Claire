@@ -151,11 +151,46 @@ class InventoryManager:
             return None
 
         # Decode, sign, and send the transaction
-        # In production: deserialize VersionedTransaction, sign, send
-        logger.info("Swap transaction received, would sign and send")
-        
-        # TODO: Implement actual tx signing and sending
-        return "mock_signature"
+        import base64
+        from solders.transaction import VersionedTransaction as VTx
+        from solana.rpc.async_api import AsyncClient
+        from solana.rpc.commitment import Confirmed
+
+        try:
+            # Deserialize the transaction
+            tx_bytes = base64.b64decode(swap_tx)
+            tx = VTx.from_bytes(tx_bytes)
+
+            # Sign with our keypair
+            signed_tx = VTx(tx.message, [self._keypair])
+
+            # Send transaction
+            async with AsyncClient(
+                CONFIG.rpc.endpoint, commitment=Confirmed
+            ) as client:
+                result = await client.send_transaction(signed_tx)
+                sig = str(result.value)
+                logger.info(f"Swap TX sent: {sig}")
+
+                # Wait for confirmation (max 30s)
+                import asyncio
+                for _ in range(60):
+                    await asyncio.sleep(0.5)
+                    status = await client.get_signature_statuses([result.value])
+                    if status.value and status.value[0]:
+                        if status.value[0].err is None:
+                            logger.info(f"Swap confirmed: {sig}")
+                            return sig
+                        else:
+                            logger.error(f"Swap failed: {status.value[0].err}")
+                            return None
+
+                logger.warning(f"Swap TX timeout (not confirmed in 30s): {sig}")
+                return sig  # return anyway, may confirm later
+
+        except Exception as e:
+            logger.error(f"Swap execution error: {e}")
+            return None
 
 
     async def swap_token_to_sol(self, mint: str) -> Optional[str]:
