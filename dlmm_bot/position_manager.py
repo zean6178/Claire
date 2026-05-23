@@ -283,51 +283,51 @@ class PositionManager:
         side: PositionSide,
     ) -> Optional[str]:
         """
-        Build and send the AddLiquidity transaction to Meteora DLMM.
-        
-        NOTE: This is the integration point with Meteora's on-chain program.
-        In production, you would use:
-        1. meteora-dlmm-sdk (TypeScript) via a sidecar, OR
-        2. Direct instruction building with anchor IDL, OR
-        3. Meteora's transaction API if available.
-        
-        The actual instruction structure:
-        - Program: LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo
-        - Instruction: AddLiquidityByStrategy or AddLiquidityOneSide
-        - Accounts: position, lb_pair, bin_arrays, user token accounts, etc.
+        Send AddLiquidity via tx-builder sidecar (Node.js + Meteora SDK).
+        Calls POST http://127.0.0.1:3456/add-liquidity
         """
         try:
-            # Build instruction params
-            program_id = pubkey(CONFIG.meteora_dlmm_program_id)
-            pool_pubkey = pubkey(candidate.address)
-            
-            amount_lamports = sol_to_lamports(sol_amount)
+            # Determine strategy shape name
+            shape_map = {
+                "spot": "spot",
+                "curve": "curve",
+                "bid_ask": "bid_ask",
+            }
 
-            # In production: derive position PDA, create position account,
-            # build AddLiquidityByStrategy instruction with:
-            # - strategy_type: Bid-Ask / Spot / Curve
-            # - min_bin_id, max_bin_id
-            # - amount_x (token), amount_y (SOL)
-            # - For single-sided SOL: amount_x = 0, amount_y = lamports
+            payload = {
+                "pool_address": candidate.address,
+                "amount_sol": sol_amount,
+                "strategy": shape_map.get(self.cfg.default_shape, "spot"),
+                "min_bin_id": bin_ids[0] if bin_ids else None,
+                "max_bin_id": bin_ids[-1] if bin_ids else None,
+                "single_sided_sol": side == PositionSide.SINGLE_SIDED_SOL,
+            }
 
             logger.info(
-                f"TX: AddLiquidity to {candidate.address} | "
-                f"amount_y={amount_lamports} lamports | "
-                f"bins={bin_ids[0]}..{bin_ids[-1]}"
+                f"TX: AddLiquidity via sidecar | "
+                f"Pool={candidate.address} | SOL={sol_amount} | "
+                f"Bins={bin_ids[0]}..{bin_ids[-1]}"
             )
 
-            # TODO: Implement actual transaction building
-            # This requires either:
-            # 1. Porting Meteora SDK to Python (complex), or
-            # 2. Using a TypeScript sidecar process, or  
-            # 3. Using Meteora's API endpoint for tx construction
+            tx_builder_url = f"http://127.0.0.1:{CONFIG.tx_builder_port}/add-liquidity"
+            resp = await self._http.post(tx_builder_url, json=payload, timeout=60.0)
 
-            # Placeholder: return a mock position key
-            # In production, this would be the actual position PDA
-            return f"pos_{candidate.address[:8]}_{now_ts()}"
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    sig = data.get("signature", "")
+                    position_key = data.get("position", sig)
+                    logger.info(f"TX confirmed: {sig}")
+                    return position_key
+                else:
+                    logger.error(f"TX builder error: {data.get('error', 'unknown')}")
+                    return None
+            else:
+                logger.error(f"TX builder HTTP {resp.status_code}: {resp.text}")
+                return None
 
         except Exception as e:
-            logger.error(f"Failed to send AddLiquidity tx: {e}")
+            logger.error(f"Failed to call tx-builder sidecar: {e}")
             return None
 
 
@@ -371,25 +371,37 @@ class PositionManager:
         self, position: ActivePosition
     ) -> bool:
         """
-        Build and send RemoveAllLiquidity + ClaimFee transaction.
+        Send RemoveAllLiquidity + ClaimFee via tx-builder sidecar.
+        Calls POST http://127.0.0.1:3456/remove-liquidity
         """
         try:
-            # In production:
-            # 1. ClaimFee instruction (claim accrued fees)
-            # 2. RemoveAllLiquidity instruction
-            # 3. ClosePosition instruction (reclaim rent)
-            # All can be bundled in one transaction
+            payload = {
+                "pool_address": position.pool_address,
+                "position_address": position.position_pubkey,
+            }
 
             logger.info(
-                f"TX: RemoveAllLiquidity from {position.pool_address} | "
-                f"Position: {position.position_pubkey}"
+                f"TX: RemoveLiquidity via sidecar | "
+                f"Pool={position.pool_address} | Position={position.position_pubkey}"
             )
 
-            # TODO: Implement actual transaction
-            return True
+            tx_builder_url = f"http://127.0.0.1:{CONFIG.tx_builder_port}/remove-liquidity"
+            resp = await self._http.post(tx_builder_url, json=payload, timeout=60.0)
+
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success"):
+                    logger.info(f"RemoveLiquidity TX confirmed: {data.get('signature')}")
+                    return True
+                else:
+                    logger.error(f"RemoveLiquidity error: {data.get('error', 'unknown')}")
+                    return False
+            else:
+                logger.error(f"TX builder HTTP {resp.status_code}: {resp.text}")
+                return False
 
         except Exception as e:
-            logger.error(f"Failed to close position: {e}")
+            logger.error(f"Failed to call tx-builder for remove: {e}")
             return False
 
     async def claim_fees(self, position_key: str) -> Tuple[float, float]:

@@ -21,6 +21,7 @@ from .position_manager import (
     PositionShape,
     PositionSide,
 )
+from .pool_selector import YunssValidator
 from .risk import RiskManager
 from .scanner import PoolCandidate, PoolScanner
 from .scoring import PoolScore, PoolScorer
@@ -65,6 +66,7 @@ class DLMMBot:
         self.risk = RiskManager()
         self.inventory = InventoryManager()
         self.pnl = PnLTracker()
+        self.yunss = YunssValidator()  # Yunss DLMM guide validation
         self.telegram: Optional[TelegramBot] = None
 
         # State
@@ -239,7 +241,27 @@ class DLMMBot:
                 liquidity_usd=candidate.liquidity_usd,
             )
 
-        # --- STEP 2: Select strategy ---
+        # --- STEP 2: Yunss DLMM Validation (rugcheck, MC-based pool, TVL, bin cost) ---
+        # Get market cap from token_x data if available
+        market_cap = candidate.extra.get("market_cap", 0.0)
+        is_uptrend = candidate.extra.get("is_uptrend", False)
+
+        yunss_passed, yunss_reason, yunss_meta = await self.yunss.validate_pool(
+            candidate=candidate,
+            market_cap_usd=market_cap,
+            is_uptrend=is_uptrend,
+            is_high_volume=(candidate.volume_5m_usd >= 5000),
+        )
+
+        if not yunss_passed:
+            logger.debug(f"Yunss validation FAILED for {candidate.name}: {yunss_reason}")
+            return
+
+        # Use Yunss-recommended shape and bins if available
+        yunss_shape = yunss_meta.get("shape", None)
+        yunss_bins = yunss_meta.get("num_bins", None)
+
+        # --- STEP 3: Select strategy ---
         strategy = select_strategy_for_pool(
             pool_age_seconds=candidate.pool_age_seconds,
             volume_5m_usd=candidate.volume_5m_usd,
@@ -307,20 +329,22 @@ class DLMMBot:
             )
             return
 
-        # --- STEP 5: OPEN POSITION ---
-        shape = PositionShape(strategy.shape)
+        # --- STEP 6: OPEN POSITION ---
+        # Use Yunss-recommended shape/bins, fallback to strategy defaults
+        shape = PositionShape(yunss_shape) if yunss_shape else PositionShape(strategy.shape)
         side = (
             PositionSide.SINGLE_SIDED_SOL
             if strategy.side == "single_sided_sol"
             else PositionSide.BOTH_SIDES
         )
+        num_bins = yunss_bins or strategy.num_bins
 
         position = await self.position_manager.open_position(
             candidate=candidate,
             sol_amount=sol_amount,
             shape=shape,
             side=side,
-            num_bins=strategy.num_bins,
+            num_bins=num_bins,
         )
 
         if position:

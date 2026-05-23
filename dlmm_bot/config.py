@@ -199,6 +199,9 @@ class BotConfig:
     # Meteora DLMM Program ID
     meteora_dlmm_program_id: str = "LBUZKhRxPF3XUpBCjp4YzTKgLccjZhTSDM9YuVaPwxo"
 
+    # TX Builder sidecar port
+    tx_builder_port: int = int(os.getenv("TX_BUILDER_PORT", "3456"))
+
 
 # Global config instance
 CONFIG = BotConfig()

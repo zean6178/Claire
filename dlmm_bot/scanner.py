@@ -91,6 +91,22 @@ class PoolScanner:
             await meteora_limiter.wait()
         return all_pools
 
+    @retry(max_retries=2, delay=1.0)
+    async def fetch_fresh_pools(self) -> List[Dict[str, Any]]:
+        """Fetch newest DLMM pools (sorted by creation time) to catch fresh launches."""
+        await meteora_limiter.wait()
+        http = await self._get_http()
+        resp = await http.get(
+            f"{self.cfg.meteora_api_url}/pools",
+            params={"limit": 50, "page": 1, "sort_by": "pool_created_at:desc"},
+        )
+        if resp.status_code != 200:
+            return []
+        data = resp.json()
+        if isinstance(data, dict) and "data" in data:
+            return data["data"]
+        return []
+
     @retry(max_retries=3, delay=1.0)
     async def fetch_pool_detail(self, pool_address: str) -> Dict[str, Any]:
         """Fetch detailed info for a specific pool."""
@@ -211,17 +227,29 @@ class PoolScanner:
     async def scan(self) -> List[PoolCandidate]:
         """
         Main scan loop: fetch pools, filter, enrich, score, return candidates.
+        Fetches both top-volume pools AND fresh launches.
         """
         logger.info("Scanning for DLMM pool candidates...")
 
-        # Fetch all pools
+        # Fetch top volume pools
         try:
             all_pools = await self.fetch_all_pools()
         except Exception as e:
             logger.error(f"Failed to fetch pools: {e}")
-            return []
+            all_pools = []
 
-        logger.info(f"Fetched {len(all_pools)} total DLMM pools")
+        # Fetch fresh launches (newest pools)
+        try:
+            fresh_pools = await self.fetch_fresh_pools()
+            # Merge without duplicates
+            existing_addrs = {p.get("address") for p in all_pools}
+            for fp in fresh_pools:
+                if fp.get("address") not in existing_addrs:
+                    all_pools.append(fp)
+        except Exception as e:
+            logger.debug(f"Failed to fetch fresh pools: {e}")
+
+        logger.info(f"Fetched {len(all_pools)} total DLMM pools (incl. fresh launches)")
 
         # Basic filter pass
         filtered = [p for p in all_pools if self._passes_basic_filters(p)]
@@ -336,6 +364,9 @@ class PoolScanner:
             pool_age_seconds=pool_age,
             active_bin_id=int(pool.get("active_id", 0) or pool.get("active_bin_id", 0) or 0),
             created_at=int(pool.get("created_at", 0) or 0),
+            extra={
+                "market_cap": float(token_x.get("market_cap", 0) or 0) if isinstance(token_x, dict) else 0.0,
+            },
         )
 
     def _passes_detailed_filters(self, c: PoolCandidate) -> bool:
