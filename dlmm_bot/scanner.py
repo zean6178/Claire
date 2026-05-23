@@ -76,7 +76,7 @@ class PoolScanner:
         for page in range(1, 6):  # 5 pages x 100 = up to 500 pools
             resp = await http.get(
                 f"{self.cfg.meteora_api_url}/pools",
-                params={"limit": 100, "page": page, "sort_by": "volume", "order": "desc"},
+                params={"limit": 100, "page": page, "sort_by": "volume_24h:desc"},
             )
             if resp.status_code != 200:
                 break
