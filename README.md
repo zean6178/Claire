@@ -1,4 +1,4 @@
-# Claire — Meteora DLMM Memecoin Fee-Farming Bot
+# Claire — Meteora DLMM Memecoin
 
 **Automated short-term market maker on Solana memecoin pools.**  
 **Strategy: single-sided SOL, fee-first, inventory-light, exit before the dump.**
