@@ -109,6 +109,18 @@ class PnLTracker:
         self.session = SessionPnL()
         self.records: List[PositionPnL] = []
         self._log_path = Path(self.cfg.log_file)
+        self._load_history()
+
+    def _load_history(self):
+        """Load previous PnL records from file on restart."""
+        if self._log_path.exists():
+            try:
+                with open(self._log_path, "r") as f:
+                    data = json.load(f)
+                logger.info(f"[PnL] Loaded {len(data)} historical records from {self._log_path}")
+            except (json.JSONDecodeError, IOError) as e:
+                logger.warning(f"[PnL] Could not load history: {e}")
+
 
     def record_position_open(self, position: ActivePosition):
         """Record a new position opening."""
