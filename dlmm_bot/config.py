@@ -58,8 +58,8 @@ class ScannerConfig:
     # Scan interval
     scan_interval_seconds: int = 10
 
-    # Meteora API
-    meteora_api_url: str = "https://dlmm-api.meteora.ag"
+    # Meteora API (new endpoint as of 2025)
+    meteora_api_url: str = "https://dlmm.datapi.meteora.ag"
     dexscreener_api_url: str = "https://api.dexscreener.com/latest/dex"
     jupiter_price_api_url: str = "https://api.jup.ag/price/v2"
 

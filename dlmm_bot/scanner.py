@@ -71,16 +71,27 @@ class PoolScanner:
         """Fetch all DLMM pools from Meteora API."""
         await meteora_limiter.wait()
         http = await self._get_http()
-        resp = await http.get(f"{self.cfg.meteora_api_url}/pair/all")
+        # New Meteora API: /pools with pagination
+        resp = await http.get(f"{self.cfg.meteora_api_url}/pools", params={"limit": 100})
+        if resp.status_code == 404:
+            # Fallback: try /pair/all (legacy)
+            resp = await http.get(f"{self.cfg.meteora_api_url}/pair/all")
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        # Handle paginated response
+        if isinstance(data, dict) and "data" in data:
+            return data["data"]
+        return data
 
     @retry(max_retries=3, delay=1.0)
     async def fetch_pool_detail(self, pool_address: str) -> Dict[str, Any]:
         """Fetch detailed info for a specific pool."""
         await meteora_limiter.wait()
         http = await self._get_http()
-        resp = await http.get(f"{self.cfg.meteora_api_url}/pair/{pool_address}")
+        resp = await http.get(f"{self.cfg.meteora_api_url}/pools/{pool_address}")
+        if resp.status_code == 404:
+            # Fallback: try legacy endpoint
+            resp = await http.get(f"{self.cfg.meteora_api_url}/pair/{pool_address}")
         resp.raise_for_status()
         return resp.json()
 
