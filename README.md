@@ -1,4 +1,4 @@
-# Claire — Meteora DLMM Memecoin
+Claire - Meteora DLMM
 
 **Automated short-term market maker on Solana memecoin pools.**  
 **Strategy: single-sided SOL, fee-first, inventory-light, exit before the dump.**
