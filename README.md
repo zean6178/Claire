@@ -1,4 +1,4 @@
-# Claire - Meteora DLMM Memecoin Fee-Farming Bot
+# Claire - Meteora DLMM
 
 **Automated liquidity provisioning bot for Solana memecoin pools on Meteora DLMM.**
 
